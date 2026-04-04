@@ -1,5 +1,8 @@
 // Shared modules -- some items are only used by cred or credd (not both).
 mod agent_keys;
+mod backend;
+mod backend_engram;
+mod backend_sqlite;
 mod crypto;
 mod store;
 mod types;
