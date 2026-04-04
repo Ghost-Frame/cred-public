@@ -1,4 +1,7 @@
 mod agent_keys;
+mod backend;
+mod backend_engram;
+mod backend_sqlite;
 mod crypto;
 mod store;
 mod types;
@@ -106,7 +109,7 @@ async fn main() -> Result<()> {
         .context("failed to derive key from YubiKey")?;
     info!("master key derived, store unlocked");
 
-    let store = Arc::new(CredStore::with_key(master_key)?);
+    let store = Arc::new(CredStore::new(master_key)?);
 
     let state = Arc::new(AppState {
         store,

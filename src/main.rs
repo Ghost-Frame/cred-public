@@ -182,7 +182,7 @@ fn unlock_store() -> Result<CredStore> {
         .context("failed to derive key from YubiKey -- is it plugged in?")?;
     eprintln!("unlocked.");
 
-    CredStore::with_key(key)
+    CredStore::new(key)
 }
 
 // ---------------------------------------------------------------------------
