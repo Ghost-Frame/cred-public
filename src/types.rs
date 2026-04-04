@@ -1,10 +1,8 @@
 use std::collections::HashMap;
 
-use aes_gcm::{Aes256Gcm, Key};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::crypto;
 
 // ---------------------------------------------------------------------------
 // Secret value types
@@ -183,74 +181,6 @@ impl Secret {
             engram_id: None,
             created_at: Some(Utc::now()),
         }
-    }
-
-    /// Encrypt and format for Engram storage as v3.
-    pub fn to_engram_content(&self, master_key: &Key<Aes256Gcm>) -> Result<String, anyhow::Error> {
-        let json = serde_json::to_vec(&self.value)?;
-        let ciphertext = crypto::encrypt(master_key, &json)?;
-        Ok(format!("[CRED:v3] {}/{} = {}", self.service, self.key, hex::encode(&ciphertext)))
-    }
-
-    /// Parse from Engram content. Handles v1, v2, and v3 formats.
-    /// v1 and v2 are migrated to ApiKey on read.
-    pub fn from_engram_content(
-        content: &str,
-        engram_id: u64,
-        master_key: Option<&Key<Aes256Gcm>>,
-    ) -> Option<Self> {
-        // v3: encrypted JSON SecretValue
-        if let Some(rest) = content.strip_prefix("[CRED:v3] ") {
-            let (path, hex_data) = rest.split_once(" = ")?;
-            let (service, key) = path.split_once('/')?;
-            let master_key = master_key?;
-            let ciphertext = hex::decode(hex_data.trim()).ok()?;
-            let plaintext = crypto::decrypt(master_key, &ciphertext).ok()?;
-            let value: SecretValue = serde_json::from_slice(&plaintext).ok()?;
-            return Some(Self {
-                service: service.to_string(),
-                key: key.to_string(),
-                value,
-                engram_id: Some(engram_id),
-                created_at: None,
-            });
-        }
-
-        // v2: encrypted raw string -> migrate to ApiKey
-        if let Some(rest) = content.strip_prefix("[CRED:v2] ") {
-            let (path, hex_data) = rest.split_once(" = ")?;
-            let (service, key) = path.split_once('/')?;
-            let master_key = master_key?;
-            let ciphertext = hex::decode(hex_data.trim()).ok()?;
-            let plaintext = crypto::decrypt(master_key, &ciphertext).ok()?;
-            let raw_value = String::from_utf8(plaintext).ok()?;
-            return Some(Self {
-                service: service.to_string(),
-                key: key.to_string(),
-                value: SecretValue::ApiKey { key: raw_value, url: None, notes: Some("migrated from v2".to_string()) },
-                engram_id: Some(engram_id),
-                created_at: None,
-            });
-        }
-
-        // v1: base64 raw string -> migrate to ApiKey
-        if let Some(rest) = content.strip_prefix("[CRED] ") {
-            use base64::Engine;
-            let (path, encoded) = rest.split_once(" = ")?;
-            let (service, key) = path.split_once('/')?;
-            let raw_value = String::from_utf8(
-                base64::engine::general_purpose::STANDARD.decode(encoded.trim()).ok()?
-            ).ok()?;
-            return Some(Self {
-                service: service.to_string(),
-                key: key.to_string(),
-                value: SecretValue::ApiKey { key: raw_value, url: None, notes: Some("migrated from v1".to_string()) },
-                engram_id: Some(engram_id),
-                created_at: None,
-            });
-        }
-
-        None
     }
 }
 
