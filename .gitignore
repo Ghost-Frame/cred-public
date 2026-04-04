@@ -1,0 +1,8 @@
+/target
+*.exe
+*.pdb
+*.dll
+CLAUDE.md
+.claude/
+ykchallenge/bin/
+ykchallenge/obj/
