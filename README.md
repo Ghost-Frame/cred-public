@@ -175,3 +175,7 @@ cred-gui
 
 [Elastic License 2.0 (ELv2)](LICENSE)
 
+---
+
+Support: **support@syntheos.dev** · Security: **security@syntheos.dev** · [Security Policy](SECURITY.md)
+
