@@ -318,10 +318,17 @@ async fn cmd_recover(from: &str) -> Result<()> {
     let passphrase = rpassword::read_password_from_tty(Some("recovery passphrase: "))
         .context("failed to read passphrase")?;
 
-    let secret = crypto::decrypt_recovery(&passphrase, &data)
+    let (secret, recovered_challenge) = crypto::decrypt_recovery_v2(&passphrase, &data)
         .context("decryption failed -- wrong passphrase?")?;
 
     eprintln!("secret recovered ({} bytes)", secret.len());
+    if let Some(ref challenge) = recovered_challenge {
+        eprintln!("challenge file recovered ({} bytes)", challenge.len());
+    } else {
+        eprintln!("WARNING: v1 recovery file -- no challenge included.");
+        eprintln!("if your challenge file (~/.config/cred/challenge) is lost,");
+        eprintln!("you will need to re-encrypt all secrets after recovery.");
+    }
     eprintln!();
 
     // Check if YubiKey is present for programming
@@ -334,8 +341,31 @@ async fn cmd_recover(from: &str) -> Result<()> {
             yubikey::program_hmac_secret(&secret)?;
             eprintln!("YubiKey programmed.");
 
-            // Make sure challenge file exists
-            let _challenge = yubikey::get_or_create_challenge()?;
+            // Restore challenge file if we have it
+            if let Some(ref challenge) = recovered_challenge {
+                let config_dir = std::env::var("XDG_CONFIG_HOME")
+                    .map(std::path::PathBuf::from)
+                    .unwrap_or_else(|_| {
+                        let home = std::env::var("HOME")
+                            .or_else(|_| std::env::var("USERPROFILE"))
+                            .unwrap_or_else(|_| ".".to_string());
+                        std::path::PathBuf::from(home).join(".config")
+                    })
+                    .join("cred");
+                std::fs::create_dir_all(&config_dir)?;
+                let challenge_path = config_dir.join("challenge");
+                std::fs::write(&challenge_path, challenge)?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&challenge_path, std::fs::Permissions::from_mode(0o600))?;
+                }
+                eprintln!("challenge file restored.");
+            } else {
+                let _challenge = yubikey::get_or_create_challenge()?;
+                eprintln!("WARNING: no challenge in recovery bundle -- generated new challenge.");
+                eprintln!("existing secrets encrypted with the old challenge will be undecryptable.");
+            }
             eprintln!("ready to use.");
             return Ok(());
         }
