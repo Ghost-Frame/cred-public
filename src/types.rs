@@ -257,6 +257,24 @@ pub struct SecretResponse {
     pub value: SecretValue,
 }
 
+/// Response for agent-level secret access.
+/// Returns the value only if the agent has explicit scope for this service/key.
+/// Otherwise returns metadata only, with a field-substitution hint.
+#[derive(Debug, Serialize)]
+pub struct AgentSecretResponse {
+    pub service: String,
+    pub key: String,
+    #[serde(rename = "type")]
+    pub secret_type: String,
+    pub field_names: Vec<String>,
+    /// Only populated if the agent has scope for this service/key
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<SecretValue>,
+    /// Hint when value is withheld
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
 /// Item in GET /secrets list response
 #[derive(Debug, Serialize)]
 pub struct SecretListItem {
@@ -295,6 +313,8 @@ pub struct AgentKeyCreateRequest {
     pub agent_id: String,
     #[serde(default)]
     pub description: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -312,6 +332,7 @@ pub struct AgentKeyListItem {
     pub revoked: bool,
     pub description: String,
     pub key_prefix: String,
+    pub scopes: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

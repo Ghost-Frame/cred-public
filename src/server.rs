@@ -276,7 +276,6 @@ async fn get_secret(
 
     let tier = query.tier.unwrap_or_else(|| "tier1".to_string());
 
-    // Audit log for all retrieval, with tier
     match &auth {
         AuthLevel::Agent(id) => audit_log(id, "get_secret", &format!("service={} key={} tier={}", service, key, tier)),
         AuthLevel::Owner => audit_log("owner", "get_secret", &format!("service={} key={} tier={}", service, key, tier)),
@@ -286,12 +285,40 @@ async fn get_secret(
         (StatusCode::NOT_FOUND, Json(ApiError { error: format!("secret not found: {}/{}", service, key) }))
     })?;
 
-    Ok(Json(SecretResponse {
-        service: secret.service,
-        key: secret.key,
-        secret_type: secret.value.type_name().to_string(),
-        value: secret.value,
-    }))
+    match &auth {
+        AuthLevel::Owner => {
+            Ok(Json(serde_json::to_value(SecretResponse {
+                service: secret.service,
+                key: secret.key,
+                secret_type: secret.value.type_name().to_string(),
+                value: secret.value,
+            }).unwrap()))
+        }
+        AuthLevel::Agent(agent_id) => {
+            let has_scope = state.agent_keys.lock().await.has_scope(agent_id, &service, &key);
+            if has_scope {
+                audit_log(agent_id, "get_secret_plaintext", &format!("service={} key={} (scoped)", service, key));
+                Ok(Json(serde_json::to_value(AgentSecretResponse {
+                    service: secret.service,
+                    key: secret.key,
+                    secret_type: secret.value.type_name().to_string(),
+                    field_names: secret.value.field_names(),
+                    value: Some(secret.value),
+                    hint: None,
+                }).unwrap()))
+            } else {
+                audit_log(agent_id, "get_secret_metadata", &format!("service={} key={} (no scope)", service, key));
+                Ok(Json(serde_json::to_value(AgentSecretResponse {
+                    service: secret.service,
+                    key: secret.key,
+                    secret_type: secret.value.type_name().to_string(),
+                    field_names: secret.value.field_names(),
+                    value: None,
+                    hint: Some("agent does not have scope for this secret -- request owner to add scope".to_string()),
+                }).unwrap()))
+            }
+        }
+    }
 }
 
 async fn delete_secret(
@@ -350,7 +377,7 @@ async fn create_agent_key(
     require_owner(&auth)?;
 
     let mut agent_keys = state.agent_keys.lock().await;
-    let key = agent_keys.generate(&req.agent_id, &req.description).map_err(|e| {
+    let key = agent_keys.generate(&req.agent_id, &req.description, req.scopes.clone()).map_err(|e| {
         (StatusCode::CONFLICT, Json(ApiError { error: e.to_string() }))
     })?;
 
@@ -377,6 +404,7 @@ async fn list_agent_keys(
         revoked: k.revoked,
         description: k.description.clone(),
         key_prefix: format!("{}...", &k.key[..8.min(k.key.len())]),
+        scopes: k.scopes.clone(),
     }).collect();
 
     Ok(Json(items))

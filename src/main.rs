@@ -112,6 +112,9 @@ enum AgentKeyAction {
         /// Optional description
         #[arg(short, long, default_value = "")]
         description: String,
+        /// Scopes for secret access (e.g. "github/*", "aws/api-key", "*")
+        #[arg(long)]
+        scope: Vec<String>,
     },
     /// List all agent keys (active and revoked)
     List,
@@ -479,7 +482,8 @@ async fn cmd_agent_key(action: AgentKeyAction) -> Result<()> {
         AgentKeyAction::Generate {
             agent_id,
             description,
-        } => cmd_agent_key_generate(&agent_id, &description).await,
+            scope,
+        } => cmd_agent_key_generate(&agent_id, &description, scope).await,
         AgentKeyAction::List => cmd_agent_key_list().await,
         AgentKeyAction::Revoke { agent_id, yes } => {
             cmd_agent_key_revoke(&agent_id, yes).await
@@ -487,7 +491,7 @@ async fn cmd_agent_key(action: AgentKeyAction) -> Result<()> {
     }
 }
 
-async fn cmd_agent_key_generate(agent_id: &str, description: &str) -> Result<()> {
+async fn cmd_agent_key_generate(agent_id: &str, description: &str, scopes: Vec<String>) -> Result<()> {
     // Validate agent_id: alphanumeric + hyphens only
     if agent_id.is_empty() {
         anyhow::bail!("agent_id cannot be empty");
@@ -500,7 +504,7 @@ async fn cmd_agent_key_generate(agent_id: &str, description: &str) -> Result<()>
     }
 
     let mut store = agent_keys::AgentKeyStore::load()?;
-    let key = store.generate(agent_id, description)?;
+    let key = store.generate(agent_id, description, scopes)?;
 
     eprintln!();
     eprintln!("=== AGENT KEY GENERATED ===");
