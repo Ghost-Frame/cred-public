@@ -614,6 +614,13 @@ fn prompt_secret(label: &str) -> Result<String> {
 }
 
 async fn cmd_store(store: &CredStore, service: &str, key: &str, secret_type: &str) -> Result<()> {
+    if let Err(msg) = crate::types::validate_name(service, "service") {
+        anyhow::bail!("{}", msg);
+    }
+    if let Err(msg) = crate::types::validate_name(key, "key") {
+        anyhow::bail!("{}", msg);
+    }
+
     let value = match secret_type {
         "login" => {
             let url = prompt("url")?;

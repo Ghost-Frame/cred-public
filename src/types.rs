@@ -313,3 +313,26 @@ pub struct AgentKeyListItem {
     pub description: String,
     pub key_prefix: String,
 }
+
+// ---------------------------------------------------------------------------
+// Input validation
+// ---------------------------------------------------------------------------
+
+/// Validate a service or key name. Names must be 1-128 characters,
+/// ASCII alphanumeric plus hyphen, underscore, and dot.
+/// No slashes, equals, spaces, or control characters.
+pub fn validate_name(name: &str, label: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err(format!("{} cannot be empty", label));
+    }
+    if name.len() > 128 {
+        return Err(format!("{} too long (max 128 characters)", label));
+    }
+    if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.') {
+        return Err(format!(
+            "{} contains invalid characters (allowed: a-z, A-Z, 0-9, hyphen, underscore, dot)",
+            label
+        ));
+    }
+    Ok(())
+}
