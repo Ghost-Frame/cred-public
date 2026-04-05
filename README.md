@@ -121,7 +121,7 @@ dotnet build -c Release
 ## credd (HTTP daemon)
 
 ```bash
-export CRED_OWNER_KEY=your-owner-key    # or ENGRAM_API_KEY
+export CRED_OWNER_KEY=your-owner-key    # required, must differ from ENGRAM_API_KEY
 export ENGRAM_URL=http://your-backend:port
 export ENGRAM_API_KEY=your-api-key
 export CREDD_BIND=0.0.0.0:4400         # optional, default 0.0.0.0:4400

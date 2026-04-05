@@ -92,8 +92,7 @@ async fn main() -> Result<()> {
         .init();
 
     let owner_key = std::env::var("CRED_OWNER_KEY")
-        .or_else(|_| std::env::var("ENGRAM_API_KEY"))
-        .expect("FATAL: CRED_OWNER_KEY or ENGRAM_API_KEY must be set");
+        .expect("FATAL: CRED_OWNER_KEY must be set (do not reuse ENGRAM_API_KEY)");
 
     let agent_keys = AgentKeyStore::load().unwrap_or_else(|e| {
         warn!("failed to load agent keys: {}, starting fresh", e);
@@ -231,6 +230,13 @@ async fn store_secret(
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
     let auth = authenticate(&headers, &state).await?;
     require_owner(&auth)?;
+
+    if let Err(msg) = crate::types::validate_name(&req.service, "service") {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiError { error: msg })));
+    }
+    if let Err(msg) = crate::types::validate_name(&req.key, "key") {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiError { error: msg })));
+    }
 
     let secret = Secret::new(&req.service, &req.key, req.value);
     let id = state.store.store(&secret).await.map_err(|e| {
