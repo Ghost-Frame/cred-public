@@ -7,12 +7,13 @@ mod store;
 mod types;
 mod yubikey;
 
-use std::net::SocketAddr;
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use axum::{
-    extract::{Path, Query, State},
+    extract::{ConnectInfo, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{delete, get, post},
@@ -31,37 +32,51 @@ use crate::types::*;
 // Rate limiter (unchanged from original)
 // ---------------------------------------------------------------------------
 
-struct AuthRateLimiter {
+struct RateLimitEntry {
     failures: u32,
     last_failure: Option<std::time::Instant>,
+}
+
+struct AuthRateLimiter {
+    entries: HashMap<IpAddr, RateLimitEntry>,
 }
 
 const MAX_FAILURES: u32 = 5;
 const BASE_LOCKOUT_SECS: u64 = 30;
 const MAX_LOCKOUT_SECS: u64 = 3600;
+const MAX_TRACKED_IPS: usize = 10_000;
 
 impl AuthRateLimiter {
-    fn new() -> Self { Self { failures: 0, last_failure: None } }
+    fn new() -> Self { Self { entries: HashMap::new() } }
 
-    fn check_lockout(&self) -> Option<u64> {
-        if self.failures < MAX_FAILURES { return None; }
-        let last = self.last_failure?;
+    fn check_lockout(&self, ip: &IpAddr) -> Option<u64> {
+        let entry = self.entries.get(ip)?;
+        if entry.failures < MAX_FAILURES { return None; }
+        let last = entry.last_failure?;
         let lockout = std::cmp::min(
-            BASE_LOCKOUT_SECS * 2u64.saturating_pow(self.failures - MAX_FAILURES),
+            BASE_LOCKOUT_SECS * 2u64.saturating_pow(entry.failures - MAX_FAILURES),
             MAX_LOCKOUT_SECS,
         );
         let elapsed = last.elapsed().as_secs();
         if elapsed < lockout { Some(lockout - elapsed) } else { None }
     }
 
-    fn record_failure(&mut self) {
-        self.failures = self.failures.saturating_add(1);
-        self.last_failure = Some(std::time::Instant::now());
+    fn record_failure(&mut self, ip: IpAddr) {
+        if self.entries.len() >= MAX_TRACKED_IPS {
+            self.entries.retain(|_, e| {
+                e.last_failure.map_or(false, |t| t.elapsed().as_secs() < MAX_LOCKOUT_SECS)
+            });
+        }
+        let entry = self.entries.entry(ip).or_insert(RateLimitEntry {
+            failures: 0,
+            last_failure: None,
+        });
+        entry.failures = entry.failures.saturating_add(1);
+        entry.last_failure = Some(std::time::Instant::now());
     }
 
-    fn record_success(&mut self) {
-        self.failures = 0;
-        self.last_failure = None;
+    fn record_success(&mut self, ip: IpAddr) {
+        self.entries.remove(&ip);
     }
 }
 
@@ -136,10 +151,9 @@ async fn main() -> Result<()> {
     let addr: SocketAddr = bind_addr.parse().expect("invalid CREDD_BIND");
     info!("credd listening on {}", addr);
 
-    axum::serve(
-        tokio::net::TcpListener::bind(addr).await?,
-        app,
-    ).await.context("server error")
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .await.context("server error")
 }
 
 // ---------------------------------------------------------------------------
@@ -149,10 +163,11 @@ async fn main() -> Result<()> {
 async fn authenticate(
     headers: &HeaderMap,
     state: &AppState,
+    client_ip: IpAddr,
 ) -> Result<AuthLevel, (StatusCode, Json<ApiError>)> {
     {
         let limiter = state.rate_limiter.lock().await;
-        if let Some(remaining) = limiter.check_lockout() {
+        if let Some(remaining) = limiter.check_lockout(&client_ip) {
             return Err((StatusCode::TOO_MANY_REQUESTS, Json(ApiError {
                 error: format!("rate limited, retry in {}s", remaining),
             })));
@@ -165,12 +180,12 @@ async fn authenticate(
     let token = auth.strip_prefix("Bearer ").or_else(|| auth.strip_prefix("bearer ")).unwrap_or(auth);
 
     if token.is_empty() {
-        state.rate_limiter.lock().await.record_failure();
+        state.rate_limiter.lock().await.record_failure(client_ip);
         return Err((StatusCode::UNAUTHORIZED, Json(ApiError { error: "missing authorization".to_string() })));
     }
 
     if constant_time_eq(token.as_bytes(), state.owner_key.as_bytes()) {
-        state.rate_limiter.lock().await.record_success();
+        state.rate_limiter.lock().await.record_success(client_ip);
         return Ok(AuthLevel::Owner);
     }
 
@@ -178,12 +193,12 @@ async fn authenticate(
         let mut agent_keys = state.agent_keys.lock().await;
         if let Some(agent_id) = agent_keys.validate(token) {
             agent_keys.touch(&agent_id);
-            state.rate_limiter.lock().await.record_success();
+            state.rate_limiter.lock().await.record_success(client_ip);
             return Ok(AuthLevel::Agent(agent_id));
         }
     }
 
-    state.rate_limiter.lock().await.record_failure();
+    state.rate_limiter.lock().await.record_failure(client_ip);
     Err((StatusCode::UNAUTHORIZED, Json(ApiError { error: "invalid key".to_string() })))
 }
 
@@ -225,10 +240,11 @@ struct ServiceFilter {
 
 async fn store_secret(
     headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<StoreSecretRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
-    let auth = authenticate(&headers, &state).await?;
+    let auth = authenticate(&headers, &state, addr.ip()).await?;
     require_owner(&auth)?;
 
     if let Err(msg) = crate::types::validate_name(&req.service, "service") {
@@ -251,11 +267,12 @@ async fn store_secret(
 
 async fn get_secret(
     headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
     Path((service, key)): Path<(String, String)>,
     Query(query): Query<TierQuery>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
-    let auth = authenticate(&headers, &state).await?;
+    let auth = authenticate(&headers, &state, addr.ip()).await?;
 
     let tier = query.tier.unwrap_or_else(|| "tier1".to_string());
 
@@ -279,10 +296,11 @@ async fn get_secret(
 
 async fn delete_secret(
     headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
     Path((service, key)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
-    let auth = authenticate(&headers, &state).await?;
+    let auth = authenticate(&headers, &state, addr.ip()).await?;
     require_owner(&auth)?;
 
     state.store.delete(&service, &key).await.map_err(|_| {
@@ -294,10 +312,11 @@ async fn delete_secret(
 
 async fn list_secrets(
     headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
     Query(filter): Query<ServiceFilter>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
-    let _auth = authenticate(&headers, &state).await?;
+    let _auth = authenticate(&headers, &state, addr.ip()).await?;
 
     let all = state.store.list_all().await.map_err(|e| {
         error!("list error: {}", e);
@@ -323,10 +342,11 @@ async fn list_secrets(
 
 async fn create_agent_key(
     headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
     Json(req): Json<AgentKeyCreateRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
-    let auth = authenticate(&headers, &state).await?;
+    let auth = authenticate(&headers, &state, addr.ip()).await?;
     require_owner(&auth)?;
 
     let mut agent_keys = state.agent_keys.lock().await;
@@ -343,9 +363,10 @@ async fn create_agent_key(
 
 async fn list_agent_keys(
     headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
-    let auth = authenticate(&headers, &state).await?;
+    let auth = authenticate(&headers, &state, addr.ip()).await?;
     require_owner(&auth)?;
 
     let agent_keys = state.agent_keys.lock().await;
@@ -363,10 +384,11 @@ async fn list_agent_keys(
 
 async fn revoke_agent_key(
     headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     State(state): State<Arc<AppState>>,
     Path(agent_id): Path<String>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
-    let auth = authenticate(&headers, &state).await?;
+    let auth = authenticate(&headers, &state, addr.ip()).await?;
     require_owner(&auth)?;
 
     let mut agent_keys = state.agent_keys.lock().await;
