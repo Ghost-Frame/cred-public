@@ -137,15 +137,15 @@ pub fn decrypt_recovery(passphrase: &str, data: &[u8]) -> Result<Vec<u8>> {
 
 /// Bundle the HMAC secret and challenge into a single recovery payload,
 /// then encrypt with the passphrase.
-/// Format: version(1) || challenge_len(2 LE) || challenge || hmac_secret
+/// Format: magic("CRv2", 4) || challenge_len(2 LE) || challenge || hmac_secret
 /// The entire bundle is then encrypted via encrypt_recovery().
 #[allow(dead_code)]
 pub fn encrypt_recovery_v2(passphrase: &str, hmac_secret: &[u8], challenge: &[u8]) -> Result<Vec<u8>> {
     if challenge.len() > u16::MAX as usize {
         return Err(anyhow!("challenge too large"));
     }
-    let mut bundle = Vec::with_capacity(3 + challenge.len() + hmac_secret.len());
-    bundle.push(0x02); // version marker
+    let mut bundle = Vec::with_capacity(6 + challenge.len() + hmac_secret.len());
+    bundle.extend_from_slice(b"CRv2"); // 4-byte magic header
     bundle.extend_from_slice(&(challenge.len() as u16).to_le_bytes());
     bundle.extend_from_slice(challenge);
     bundle.extend_from_slice(hmac_secret);
@@ -158,13 +158,13 @@ pub fn encrypt_recovery_v2(passphrase: &str, hmac_secret: &[u8], challenge: &[u8
 pub fn decrypt_recovery_v2(passphrase: &str, data: &[u8]) -> Result<(Vec<u8>, Option<Vec<u8>>)> {
     let decrypted = decrypt_recovery(passphrase, data)?;
 
-    if decrypted.first() == Some(&0x02) && decrypted.len() > 3 {
-        let challenge_len = u16::from_le_bytes([decrypted[1], decrypted[2]]) as usize;
-        if decrypted.len() < 3 + challenge_len {
+    if decrypted.len() > 6 && &decrypted[..4] == b"CRv2" {
+        let challenge_len = u16::from_le_bytes([decrypted[4], decrypted[5]]) as usize;
+        if decrypted.len() < 6 + challenge_len {
             return Err(anyhow!("recovery bundle truncated"));
         }
-        let challenge = decrypted[3..3 + challenge_len].to_vec();
-        let hmac_secret = decrypted[3 + challenge_len..].to_vec();
+        let challenge = decrypted[6..6 + challenge_len].to_vec();
+        let hmac_secret = decrypted[6 + challenge_len..].to_vec();
         Ok((hmac_secret, Some(challenge)))
     } else {
         // v1 format: raw HMAC secret, no challenge

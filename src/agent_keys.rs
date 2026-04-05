@@ -104,6 +104,25 @@ impl AgentKeyStore {
 
     /// Generate a new agent key. Returns the key string (shown once to the user).
     pub fn generate(&mut self, agent_id: &str, description: &str, scopes: Vec<String>) -> Result<String> {
+        // Validate scope format: each must be "*", "service/*", or "service/key"
+        for scope in &scopes {
+            if scope == "*" {
+                continue;
+            }
+            let parts: Vec<&str> = scope.splitn(2, '/').collect();
+            if parts.len() != 2 || parts[0].is_empty() || parts[1].is_empty() {
+                anyhow::bail!("invalid scope '{}': must be '*', 'service/*', or 'service/key'", scope);
+            }
+            // Validate the service part uses allowed characters
+            if !parts[0].bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.') {
+                anyhow::bail!("invalid scope '{}': service name contains invalid characters", scope);
+            }
+            // Key part can be "*" or a valid name
+            if parts[1] != "*" && !parts[1].bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.') {
+                anyhow::bail!("invalid scope '{}': key name contains invalid characters", scope);
+            }
+        }
+
         if self.keys.contains_key(agent_id) {
             let existing = &self.keys[agent_id];
             if !existing.revoked {

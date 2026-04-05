@@ -29,7 +29,7 @@ use crate::store::CredStore;
 use crate::types::*;
 
 // ---------------------------------------------------------------------------
-// Rate limiter (unchanged from original)
+// Per-IP rate limiter
 // ---------------------------------------------------------------------------
 
 struct RateLimitEntry {
@@ -63,9 +63,19 @@ impl AuthRateLimiter {
 
     fn record_failure(&mut self, ip: IpAddr) {
         if self.entries.len() >= MAX_TRACKED_IPS {
+            // First pass: evict expired entries
             self.entries.retain(|_, e| {
                 e.last_failure.map_or(false, |t| t.elapsed().as_secs() < MAX_LOCKOUT_SECS)
             });
+            // If still at capacity, evict the oldest entry
+            if self.entries.len() >= MAX_TRACKED_IPS {
+                if let Some(oldest_ip) = self.entries.iter()
+                    .min_by_key(|(_, e)| e.last_failure)
+                    .map(|(ip, _)| *ip)
+                {
+                    self.entries.remove(&oldest_ip);
+                }
+            }
         }
         let entry = self.entries.entry(ip).or_insert(RateLimitEntry {
             failures: 0,
@@ -274,6 +284,13 @@ async fn get_secret(
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
     let auth = authenticate(&headers, &state, addr.ip()).await?;
 
+    if let Err(msg) = crate::types::validate_name(&service, "service") {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiError { error: msg })));
+    }
+    if let Err(msg) = crate::types::validate_name(&key, "key") {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiError { error: msg })));
+    }
+
     let tier = query.tier.unwrap_or_else(|| "tier1".to_string());
 
     match &auth {
@@ -330,6 +347,13 @@ async fn delete_secret(
     let auth = authenticate(&headers, &state, addr.ip()).await?;
     require_owner(&auth)?;
 
+    if let Err(msg) = crate::types::validate_name(&service, "service") {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiError { error: msg })));
+    }
+    if let Err(msg) = crate::types::validate_name(&key, "key") {
+        return Err((StatusCode::BAD_REQUEST, Json(ApiError { error: msg })));
+    }
+
     state.store.delete(&service, &key).await.map_err(|_| {
         (StatusCode::NOT_FOUND, Json(ApiError { error: format!("secret not found: {}/{}", service, key) }))
     })?;
@@ -343,7 +367,7 @@ async fn list_secrets(
     State(state): State<Arc<AppState>>,
     Query(filter): Query<ServiceFilter>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
-    let _auth = authenticate(&headers, &state, addr.ip()).await?;
+    let auth = authenticate(&headers, &state, addr.ip()).await?;
 
     let all = state.store.list_all().await.map_err(|e| {
         error!("list error: {}", e);
@@ -352,13 +376,19 @@ async fn list_secrets(
 
     let items: Vec<SecretListItem> = all.into_iter()
         .filter(|s| filter.service.as_deref().map_or(true, |f| s.service == f))
-        .map(|s| SecretListItem {
-            service: s.service,
-            key: s.key,
-            secret_type: s.value.type_name().to_string(),
-            field_names: s.value.field_names(),
-            redacted_preview: s.value.redacted_preview(),
-            engram_id: s.engram_id,
+        .map(|s| {
+            let preview = match &auth {
+                AuthLevel::Owner => s.value.redacted_preview(),
+                AuthLevel::Agent(_) => s.value.type_name().to_string(),
+            };
+            SecretListItem {
+                service: s.service,
+                key: s.key,
+                secret_type: s.value.type_name().to_string(),
+                field_names: s.value.field_names(),
+                redacted_preview: preview,
+                engram_id: s.engram_id,
+            }
         })
         .collect();
 
